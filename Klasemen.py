@@ -21,7 +21,7 @@ def init_db():
     )
     """)
 
-    # Table for Matches
+    # Table for Matches (dengan kolom tambahan)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,12 +30,40 @@ def init_db():
         team2 TEXT NOT NULL,
         score1 INTEGER,
         score2 INTEGER,
+        team1_pf INTEGER,
+        team1_pa INTEGER,
+        team2_pf INTEGER,
+        team2_pa INTEGER,
+        court TEXT,
+        waktu TEXT,
+        status TEXT DEFAULT 'scheduled',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(grup, team1, team2)
     )
     """)
+
+    # Alter Table - Tambahkan kolom jika belum ada
+    def add_column_if_not_exists(col_name, col_type):
+        try:
+            cursor.execute(f"ALTER TABLE matches ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError as e:
+            if f"duplicate column name: {col_name}" not in str(e).lower():
+                raise e  # hanya abaikan jika kolom sudah ada
+
+    for col, tipe in [
+        ("team1_pf", "INTEGER"),
+        ("team1_pa", "INTEGER"),
+        ("team2_pf", "INTEGER"),
+        ("team2_pa", "INTEGER"),
+        ("court", "TEXT"),
+        ("waktu", "TEXT"),
+        ("status", "TEXT")
+    ]:
+        add_column_if_not_exists(col, tipe)
+
     conn.commit()
     return conn, cursor
+
 
 conn, cursor = init_db()
 
@@ -89,25 +117,33 @@ def get_all_grups():
     return sorted(set([row[0] for row in cursor.execute("SELECT grup FROM teams").fetchall()]))
 
 def calculate_klasemen(grup):
-    """Calculate group standings"""
+    """Hitung klasemen berdasarkan pertandingan selesai"""
+
     teams = get_grup_teams(grup)
     if not teams:
         return pd.DataFrame()
-    
+
+    # Inisialisasi statistik
     stats = {team: {"Main": 0, "Menang": 0, "Kalah": 0, "PF": 0, "PA": 0} for team in teams}
-    
-    for row in cursor.execute("SELECT team1, team2, score1, score2 FROM matches WHERE grup=?", (grup,)):
+
+    # Ambil pertandingan selesai
+    for row in cursor.execute("""
+        SELECT team1, team2, score1, score2 
+        FROM matches 
+        WHERE grup = ? AND status = 'done'
+    """, (grup,)):
         t1, t2, s1, s2 = row
         if s1 is None or s2 is None:
             continue
-            
+
         stats[t1]["Main"] += 1
         stats[t2]["Main"] += 1
+
         stats[t1]["PF"] += s1
         stats[t1]["PA"] += s2
         stats[t2]["PF"] += s2
         stats[t2]["PA"] += s1
-        
+
         if s1 > s2:
             stats[t1]["Menang"] += 1
             stats[t2]["Kalah"] += 1
@@ -115,6 +151,7 @@ def calculate_klasemen(grup):
             stats[t2]["Menang"] += 1
             stats[t1]["Kalah"] += 1
 
+    # Susun DataFrame klasemen
     tabel = []
     for team, val in stats.items():
         selisih = val["PF"] - val["PA"]
@@ -125,8 +162,9 @@ def calculate_klasemen(grup):
             "Selisih": selisih,
             "Poin": poin
         })
-    
+
     return pd.DataFrame(tabel).sort_values(by=["Poin", "Selisih"], ascending=[False, False]).reset_index(drop=True)
+
 
 def style_klasemen(df):
     """Styling simple without background_gradient (no matplotlib needed)"""
@@ -485,7 +523,6 @@ def show_live_match():
     live_matches = pd.read_sql("""
         SELECT id, grup, team1, team2 
         FROM matches 
-        WHERE score1 IS NULL OR score2 IS NULL
         ORDER BY grup
     """, conn)
     
@@ -535,10 +572,14 @@ def show_live_match():
         
         if st.button("Simpan Skor"):
             cursor.execute("""
-                UPDATE matches 
-                SET score1=?, score2=?, updated_at=CURRENT_TIMESTAMP 
-                WHERE id=?
-            """, (score1, score2, match_id))
+                UPDATE matches SET 
+                    score1 = ?, score2 = ?, 
+                    team1_pf = ?, team1_pa = ?, 
+                    team2_pf = ?, team2_pa = ?, 
+                    status = 'done', 
+                WHERE id = ?
+            """, (score1, score2, score1, score2, score2, score1, match_id))
+
             conn.commit()
             st.success("Skor berhasil disimpan!")
             time.sleep(1)
@@ -657,12 +698,11 @@ def show_match_schedule():
 def show_live_score_tv():
     """Live Score Display for TV with auto-refresh and team selection"""
     
-    # Step 1: Pilih Pertandingan
     st.sidebar.title("📅 Pilih Pertandingan")
-    
+
     # Ambil semua pertandingan
     matches = pd.read_sql("""
-        SELECT id, grup, team1, team2, score1, score2, 
+        SELECT id, grup, team1, team2, score1, score2, status,
                strftime('%d/%m/%Y %H:%M', updated_at) as waktu
         FROM matches
         ORDER BY updated_at DESC
@@ -671,44 +711,35 @@ def show_live_score_tv():
     if matches.empty:
         st.warning("Tidak ada pertandingan yang sedang berlangsung")
         return
-    
-    # Buat dictionary mapping dari label ke match_id
+
     match_map = {
         f"{x['team1']} vs {x['team2']} (Grup {x['grup']}) - {x['waktu']}": x['id']
         for _, x in matches.iterrows()
     }
 
-    # Set default match_id di session_state jika belum ada
     if 'selected_match_id' not in st.session_state:
         st.session_state.selected_match_id = matches.iloc[0]['id']
 
-    # Temukan label default berdasarkan match_id di session_state
     default_label = next((label for label, mid in match_map.items()
                          if mid == st.session_state.selected_match_id), None)
 
-    # Dropdown pertandingan
     selected_label = st.sidebar.selectbox(
         "Pilih Pertandingan Aktif",
         options=list(match_map.keys()),
         index=list(match_map.keys()).index(default_label) if default_label else 0
     )
 
-    # Simpan match_id yang dipilih ke session_state
     st.session_state.selected_match_id = match_map[selected_label]
     match_id = st.session_state.selected_match_id
 
-    # Step 2: Tampilkan Live Score untuk pertandingan terpilih
     st.title("⚡ LIVE SCORE")
     st.markdown(f"### {selected_label}")
 
-    # Auto-refresh menggunakan st.empty() + time.sleep()
     refresh_placeholder = st.empty()
 
-    # Custom CSS untuk tampilan TV
     st.markdown("""
     <style>
         #MainMenu, header, footer {visibility: hidden;}
-        
         .scoreboard {
             background-color: #001f3f;
             color: white;
@@ -719,7 +750,6 @@ def show_live_score_tv():
             box-shadow: 0 0 25px rgba(0,0,0,0.3);
             margin-top: 30px;
         }
-
         .scoreboard .teams {
             display: flex;
             justify-content: space-around;
@@ -727,104 +757,113 @@ def show_live_score_tv():
             font-size: 4rem;
             margin-bottom: 30px;
         }
-
         .scoreboard .team-name {
             font-weight: bold;
             font-size: 2rem;
             margin-bottom: 10px;
         }
-
         .scoreboard .score {
             font-size: 5rem;
             font-weight: bold;
             color: #FFD700;
         }
-
         .scoreboard .vs {
             font-size: 3rem;
             font-weight: bold;
             margin: 0 30px;
             color: #ccc;
         }
-
         .scoreboard .match-info {
             margin-top: 20px;
             font-size: 1.5rem;
             color: #aaa;
         }
-        
-        .refresh-info {
-            position: fixed;
-            bottom: 10px;
-            right: 10px;
-            color: #666;
-            font-size: 0.8rem;
-        }
     </style>
     """, unsafe_allow_html=True)
 
-    # Ambil data pertandingan terbaru berdasarkan ID
     current_match = pd.read_sql(f"""
-        SELECT team1, team2, score1, score2, 
+        SELECT team1, team2, score1, score2, status,
                strftime('%d/%m/%Y %H:%M', updated_at) as waktu
         FROM matches 
         WHERE id = {match_id}
     """, conn).iloc[0]
 
-    # Tampilkan scoreboard
     with refresh_placeholder.container():
         st.markdown(f"""
         <div class="scoreboard">
             <div class="teams">
                 <div>
                     <div class="team-name">{current_match['team1']}</div>
-                    <div class="score">{current_match['score1'] if current_match['score1'] is not None else "0"}</div>
+                    <div class="score">{current_match['score1'] or 0}</div>
                 </div>
                 <div class="vs">VS</div>
                 <div>
                     <div class="team-name">{current_match['team2']}</div>
-                    <div class="score">{current_match['score2'] if current_match['score2'] is not None else "0"}</div>
+                    <div class="score">{current_match['score2'] or 0}</div>
                 </div>
             </div>
             <div class="match-info">
-                Terakhir diperbarui: {datetime.now().strftime('%H:%M:%S')}
+                Status: <strong>{current_match['status']}</strong> 
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Tombol kontrol untuk admin
+    # === ADMIN CONTROLS ===
     if st.session_state.get("role") == "admin":
-        st.markdown("---")
+        st.markdown("---") 
         st.subheader("Admin Controls")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            new_score1 = st.number_input(
-                f"Score {current_match['team1']}",
-                min_value=0,
-                max_value=30,
-                value=int(current_match['score1']) if current_match['score1'] is not None else 0
-            )
-        with col2:
-            new_score2 = st.number_input(
-                f"Score {current_match['team2']}",
-                min_value=0,
-                max_value=30,
-                value=int(current_match['score2']) if current_match['score2'] is not None else 0
-            )
+        status = current_match["status"]
 
-        if st.button("Update Score"):
-            cursor.execute("""
-                UPDATE matches 
-                SET score1=?, score2=?, updated_at=CURRENT_TIMESTAMP 
-                WHERE id=?
-            """, (new_score1, new_score2, match_id))
-            conn.commit()
-            st.success("Score updated!")
-            time.sleep(1)
-            st.rerun()
+        if not status  or status.lower() == "pending":
+            if st.button("🚀 Mulai Pertandingan"):
+                cursor.execute("UPDATE matches SET status = 'ongoing', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (match_id,))
+                conn.commit()
+                st.success("Pertandingan dimulai!")
+                time.sleep(1)
+                st.rerun()
 
-    # Petunjuk fullscreen
+        elif status == "ongoing":
+            col1, col2 = st.columns(2)
+            with col1:
+                new_score1 = st.number_input(
+                    f"Score {current_match['team1']}",
+                    min_value=0,
+                    max_value=30,
+                    value=int(current_match['score1']) if current_match['score1'] is not None else 0
+                )
+            with col2:
+                new_score2 = st.number_input(
+                    f"Score {current_match['team2']}",
+                    min_value=0,
+                    max_value=30,
+                    value=int(current_match['score2']) if current_match['score2'] is not None else 0
+                )
+
+            if st.button("✅ Update Score"):
+                cursor.execute("""
+                    UPDATE matches SET 
+                        score1 = ?, score2 = ?, 
+                        team1_pf = ?, team1_pa = ?, 
+                        team2_pf = ?, team2_pa = ?, 
+                        updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = ?
+                """, (new_score1, new_score2, new_score1, new_score2, new_score2, new_score1, match_id))
+                conn.commit()
+                st.success("Score diperbarui!")
+                time.sleep(1)
+                st.rerun()
+
+            if st.button("⛔ Selesaikan Pertandingan"):
+                cursor.execute("UPDATE matches SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (match_id,))
+                conn.commit()
+                st.success("Pertandingan diselesaikan.")
+                time.sleep(1)
+                st.rerun()
+
+        elif status == "done":
+            st.info("✅ Pertandingan sudah selesai.")
+
     st.sidebar.markdown("""
     ### Petunjuk Tampilan TV:
     1. Pilih pertandingan dari dropdown
@@ -832,9 +871,9 @@ def show_live_score_tv():
     3. Sistem auto-refresh setiap 1 detik
     """)
 
-    # Auto-refresh dengan rerun
     time.sleep(1)
     st.rerun()
+
 
 
 def show_match_schedule_public():
@@ -1085,6 +1124,7 @@ def main():
             "🏠 Klasemen": show_klasemen,
             "🕒 Live Match": show_live_match,
             "🗓️ Jadwal": show_match_schedule,
+            "✍️ Input Skor": show_input_score,
             "📜 Riwayat": show_match_history,
             "🔧 Manajemen Tim": show_team_management,
             "🏆 Final": show_final_bracket,
