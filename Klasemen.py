@@ -489,17 +489,30 @@ def show_live_match():
         ORDER BY grup
     """, conn)
     
-    if live_matches.empty:
-        st.info("Tidak ada pertandingan yang sedang berlangsung")
-        return
-    
-    selected_match = st.selectbox(
-        "Pilih Pertandingan",
-        live_matches.apply(lambda x: f"{x['team1']} vs {x['team2']} (Grup {x['grup']})", axis=1)
+    # Buat mapping dari display label ke match_id
+    match_map = {
+        f"{x['team1']} vs {x['team2']} (Grup {x['grup']}) - {x['waktu']}": x['id']
+        for _, x in live_matches.iterrows()
+    }
+
+    # Jika belum ada yang dipilih, set default ke match pertama
+    if 'selected_match_id' not in st.session_state:
+        st.session_state.selected_match_id = live_matches.iloc[0]['id']
+
+    # Ambil label dari match_map berdasarkan match_id tersimpan
+    default_label = next((k for k, v in match_map.items() if v == st.session_state.selected_match_id), None)
+
+    selected_label = st.sidebar.selectbox(
+        "Pilih Pertandingan Aktif",
+        options=list(match_map.keys()),
+        index=list(match_map.keys()).index(default_label) if default_label in match_map else 0
     )
-    
-    match_id = live_matches.iloc[live_matches.index[live_matches.apply(
-        lambda x: f"{x['team1']} vs {x['team2']} (Grup {x['grup']})", axis=1) == selected_match][0]]['id']
+
+    # Simpan pilihan baru ke session_state
+    st.session_state.selected_match_id = match_map[selected_label]
+
+    # Gunakan match_id dari session_state
+    match_id = st.session_state.selected_match_id
     
     # Timer section
     col1, col2 = st.columns(2)
@@ -640,6 +653,189 @@ def show_match_schedule():
        
     else:
         st.warning("Belum ada jadwal pertandingan")
+
+def show_live_score_tv():
+    """Live Score Display for TV with auto-refresh and team selection"""
+    
+    # Step 1: Pilih Pertandingan
+    st.sidebar.title("📅 Pilih Pertandingan")
+    
+    # Ambil semua pertandingan
+    matches = pd.read_sql("""
+        SELECT id, grup, team1, team2, score1, score2, 
+               strftime('%d/%m/%Y %H:%M', updated_at) as waktu
+        FROM matches
+        ORDER BY updated_at DESC
+    """, conn)
+
+    if matches.empty:
+        st.warning("Tidak ada pertandingan yang sedang berlangsung")
+        return
+    
+    # Buat dictionary mapping dari label ke match_id
+    match_map = {
+        f"{x['team1']} vs {x['team2']} (Grup {x['grup']}) - {x['waktu']}": x['id']
+        for _, x in matches.iterrows()
+    }
+
+    # Set default match_id di session_state jika belum ada
+    if 'selected_match_id' not in st.session_state:
+        st.session_state.selected_match_id = matches.iloc[0]['id']
+
+    # Temukan label default berdasarkan match_id di session_state
+    default_label = next((label for label, mid in match_map.items()
+                         if mid == st.session_state.selected_match_id), None)
+
+    # Dropdown pertandingan
+    selected_label = st.sidebar.selectbox(
+        "Pilih Pertandingan Aktif",
+        options=list(match_map.keys()),
+        index=list(match_map.keys()).index(default_label) if default_label else 0
+    )
+
+    # Simpan match_id yang dipilih ke session_state
+    st.session_state.selected_match_id = match_map[selected_label]
+    match_id = st.session_state.selected_match_id
+
+    # Step 2: Tampilkan Live Score untuk pertandingan terpilih
+    st.title("⚡ LIVE SCORE")
+    st.markdown(f"### {selected_label}")
+
+    # Auto-refresh menggunakan st.empty() + time.sleep()
+    refresh_placeholder = st.empty()
+
+    # Custom CSS untuk tampilan TV
+    st.markdown("""
+    <style>
+        #MainMenu, header, footer {visibility: hidden;}
+        
+        .scoreboard {
+            background-color: #001f3f;
+            color: white;
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            font-family: Arial, sans-serif;
+            box-shadow: 0 0 25px rgba(0,0,0,0.3);
+            margin-top: 30px;
+        }
+
+        .scoreboard .teams {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            font-size: 4rem;
+            margin-bottom: 30px;
+        }
+
+        .scoreboard .team-name {
+            font-weight: bold;
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .scoreboard .score {
+            font-size: 5rem;
+            font-weight: bold;
+            color: #FFD700;
+        }
+
+        .scoreboard .vs {
+            font-size: 3rem;
+            font-weight: bold;
+            margin: 0 30px;
+            color: #ccc;
+        }
+
+        .scoreboard .match-info {
+            margin-top: 20px;
+            font-size: 1.5rem;
+            color: #aaa;
+        }
+        
+        .refresh-info {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            color: #666;
+            font-size: 0.8rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Ambil data pertandingan terbaru berdasarkan ID
+    current_match = pd.read_sql(f"""
+        SELECT team1, team2, score1, score2, 
+               strftime('%d/%m/%Y %H:%M', updated_at) as waktu
+        FROM matches 
+        WHERE id = {match_id}
+    """, conn).iloc[0]
+
+    # Tampilkan scoreboard
+    with refresh_placeholder.container():
+        st.markdown(f"""
+        <div class="scoreboard">
+            <div class="teams">
+                <div>
+                    <div class="team-name">{current_match['team1']}</div>
+                    <div class="score">{current_match['score1'] if current_match['score1'] is not None else "0"}</div>
+                </div>
+                <div class="vs">VS</div>
+                <div>
+                    <div class="team-name">{current_match['team2']}</div>
+                    <div class="score">{current_match['score2'] if current_match['score2'] is not None else "0"}</div>
+                </div>
+            </div>
+            <div class="match-info">
+                Terakhir diperbarui: {datetime.now().strftime('%H:%M:%S')}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Tombol kontrol untuk admin
+    if st.session_state.get("role") == "admin":
+        st.markdown("---")
+        st.subheader("Admin Controls")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            new_score1 = st.number_input(
+                f"Score {current_match['team1']}",
+                min_value=0,
+                max_value=30,
+                value=int(current_match['score1']) if current_match['score1'] is not None else 0
+            )
+        with col2:
+            new_score2 = st.number_input(
+                f"Score {current_match['team2']}",
+                min_value=0,
+                max_value=30,
+                value=int(current_match['score2']) if current_match['score2'] is not None else 0
+            )
+
+        if st.button("Update Score"):
+            cursor.execute("""
+                UPDATE matches 
+                SET score1=?, score2=?, updated_at=CURRENT_TIMESTAMP 
+                WHERE id=?
+            """, (new_score1, new_score2, match_id))
+            conn.commit()
+            st.success("Score updated!")
+            time.sleep(1)
+            st.rerun()
+
+    # Petunjuk fullscreen
+    st.sidebar.markdown("""
+    ### Petunjuk Tampilan TV:
+    1. Pilih pertandingan dari dropdown
+    2. Tekan **F11** untuk mode fullscreen
+    3. Sistem auto-refresh setiap 1 detik
+    """)
+
+    # Auto-refresh dengan rerun
+    time.sleep(1)
+    st.rerun()
+
 
 def show_match_schedule_public():
     """Readonly schedule view for participants or guests"""
@@ -889,12 +1085,12 @@ def main():
             "🏠 Klasemen": show_klasemen,
             "🕒 Live Match": show_live_match,
             "🗓️ Jadwal": show_match_schedule,
-            "✍️ Input Skor": show_input_score,
             "📜 Riwayat": show_match_history,
             "🔧 Manajemen Tim": show_team_management,
             "🏆 Final": show_final_bracket,
             "🎖️ Peringkat": show_final_standings,
-            "🧾 Export": export_data
+            "🧾 Export": export_data,
+            "📺 Live Score TV": show_live_score_tv
         }
     else:
         menu_options = {
@@ -902,7 +1098,8 @@ def main():
             "🗓️ Jadwal": show_match_schedule_public,
             "📜 Riwayat": show_match_history,
             "🏆 Final": show_final_bracket,
-            "🎖️ Peringkat": show_final_standings
+            "🎖️ Peringkat": show_final_standings,
+            "📺 Live Score TV": show_live_score_tv
         }
     
     selected = st.sidebar.radio("Menu", list(menu_options.keys()))
