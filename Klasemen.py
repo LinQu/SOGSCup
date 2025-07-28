@@ -480,9 +480,9 @@ def get_all_matches():
         SELECT id, grup, team1, team2, score1, score2,
                strftime('%d/%m/%Y %H:%M', updated_at) as waktu,
                CASE 
-                   WHEN score1 IS NULL OR score2 IS NULL THEN 'Belum dimulai'
-                   ELSE 'Selesai'
-               END as status
+                    WHEN status IS NULL THEN 'Belum dimulai'
+                    ELSE status
+                END AS status
         FROM matches
         ORDER BY updated_at DESC
     """, conn)
