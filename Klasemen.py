@@ -963,44 +963,45 @@ def show_match_schedule_public():
     else:
         st.info("Belum ada jadwal yang tersedia.", icon="ℹ️")
 def show_match_history():
-    """Match history viewer"""
+    """Match history viewer with improved layout"""
     st.subheader("📜 Riwayat Pertandingan", divider="rainbow")
-    
+
     matches = get_all_matches()
     if matches.empty:
         st.warning("Belum ada riwayat pertandingan")
         return
-    
+
     # Filter options
     col1, col2 = st.columns(2)
     with col1:
-        grup_filter = st.selectbox(
-            "Filter Grup",
-            ["Semua"] + get_all_grups()
-        )
+        grup_filter = st.selectbox("Filter Grup", ["Semua"] + get_all_grups())
     with col2:
-        status_filter = st.selectbox(
-            "Filter Status",
-            ["Semua", "Selesai", "Belum dimulai"]
-        )
-    
+        status_filter = st.selectbox("Filter Status", ["Semua", "Selesai", "Belum dimulai"])
+
     # Apply filters
     if grup_filter != "Semua":
         matches = matches[matches["grup"] == grup_filter]
     if status_filter != "Semua":
         matches = matches[matches["status"] == status_filter]
-    
+
     # Display results
+    if matches.empty:
+        st.info("Tidak ada pertandingan yang sesuai filter.")
+        return
+
+    # Format tampilannya menjadi grid/list dengan highlight warna status
     for _, match in matches.iterrows():
-        with st.expander(f"{match['team1']} vs {match['team2']} (Grup {match['grup']})"):
-            cols = st.columns(3)
-            with cols[0]:
-                st.markdown(f"**Waktu:** {match['waktu']}")
-            with cols[1]:
-                st.markdown(f"**Status:** {match['status']}")
-            with cols[2]:
-                if match['status'] == "Selesai":
-                    st.markdown(f"**Hasil:** {match['score1']} - {match['score2']}")
+        warna = "green" if match['status'] == "Selesai" else "orange"
+        with st.container():
+            st.markdown(f"""
+                <div style="border: 1px solid #ccc; border-radius: 10px; padding: 10px; margin-bottom: 10px;">
+                    <h4 style="margin-bottom: 5px;">🏸 {match['team1']} vs {match['team2']} <span style="font-size: 14px;">(Grup {match['grup']})</span></h4>
+                    <p style="margin: 0;"><strong>Waktu:</strong> {match['waktu']}</p>
+                    <p style="margin: 0;"><strong>Status:</strong> <span style="color: {warna}; font-weight: bold;">{match['status']}</span></p>
+                    {"<p style='margin: 0;'><strong>Skor:</strong> " + str(match['score1']) + " - " + str(match['score2']) + "</p>" if match['status'] == "Selesai" else ""}
+                </div>
+            """, unsafe_allow_html=True)
+
 
 def show_final_standings():
     """Final tournament standings"""
