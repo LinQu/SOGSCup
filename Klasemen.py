@@ -807,6 +807,27 @@ def show_live_score_tv():
             </div>
         </div>
         """, unsafe_allow_html=True)
+        st.markdown(
+    """
+    <style>
+        .footer {
+            position: relative;
+            bottom: 0;
+            width: 100%;
+            margin-top: 50px;
+            text-align: center;
+            color: #888;
+            font-size: 12px;
+        }
+    </style>
+
+    <div class="footer">
+        <hr>
+        <p>PBGS Badminton Cup © 2025 • Developed by OPGS Dev</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+    )
 
     # === ADMIN CONTROLS ===
     if st.session_state.get("role") == "admin":
@@ -855,7 +876,7 @@ def show_live_score_tv():
                 st.rerun()
 
             if st.button("⛔ Selesaikan Pertandingan"):
-                cursor.execute("UPDATE matches SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (match_id,))
+                cursor.execute("UPDATE matches SET status = 'Selesai', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (match_id,))
                 conn.commit()
                 st.success("Pertandingan diselesaikan.")
                 time.sleep(1)
@@ -873,6 +894,7 @@ def show_live_score_tv():
 
     time.sleep(1)
     st.rerun()
+    
 
 
 
@@ -1117,7 +1139,6 @@ def main():
         login_form()
     
     # Main content
-    st.title("🏸 PBGS Badminton Cup")
     
     # Enhanced Navigation
     if st.session_state.get("role") == "admin":
@@ -1153,8 +1174,30 @@ def main():
             st.session_state.pop('start_time', None)
             st.rerun()
     
+    
     # Display selected page
     menu_options[selected]()
 
 if __name__ == "__main__":
     main()
+    st.markdown(
+    """
+    <style>
+        .footer {
+            position: relative;
+            bottom: 0;
+            width: 100%;
+            margin-top: 50px;
+            text-align: center;
+            color: #888;
+            font-size: 12px;
+        }
+    </style>
+
+    <div class="footer">
+        <hr>
+        <p>PBGS Badminton Cup © 2025 • Developed by OPGS Dev</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+    )
