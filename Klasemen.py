@@ -4,6 +4,7 @@ import sqlite3
 import random
 from datetime import datetime
 import time
+import requests
 
 # ===========================
 # Database Setup
@@ -66,6 +67,8 @@ def init_db():
 
 
 conn, cursor = init_db()
+
+
 
 # ===========================
 # Authentication
@@ -184,6 +187,16 @@ def style_klasemen(df):
 # UI Components
 # ===========================
 def show_klasemen():
+     # ======= CUACA SECTION =======
+    weather = get_weather()
+    with st.container():
+        st.markdown("### ☁️ Cuaca Saat Ini – Kosambi, Tangerang")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("🌤 Kondisi", weather["condition"])
+        col2.metric("🌧️ Hujan", f"{weather['rain']} mm/h")
+        col3.metric("🌬️ Angin", f"{weather['wind_kmh']:.1f} km/jam")
+        
+        st.markdown("---")
     """Display group standings"""
     st.subheader("📊 Klasemen Grup", divider="rainbow")
     
@@ -1095,6 +1108,31 @@ def export_data():
             mime="application/vnd.ms-excel"
         )
 
+def get_weather():
+    # Konstanta API & Lokasi
+    API_KEY = "2b795fafd0c6df1d4e28586298e87e21"  # Ganti dengan API Key Anda
+    LAT = -6.0941415
+    LON = 106.6835138
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={LAT}&lon={LON}&appid={API_KEY}&units=metric"
+    res = requests.get(url).json()
+
+    wind_speed_ms = res.get("wind", {}).get("speed", 0)
+    wind_speed_kmh = wind_speed_ms * 3.6
+    rain_1h = res.get("rain", {}).get("1h", 0.0)
+    condition = res.get("weather", [{}])[0].get("main", "-")
+
+    can_play = (rain_1h <= 0.5) and (wind_speed_kmh <= 15)
+
+    return {
+        "condition": condition,
+        "rain": rain_1h,
+        "wind_kmh": wind_speed_kmh,
+        "can_play": can_play
+    }
+
+    
+         
+
 # ===========================
 # Updated Main App
 # ===========================
@@ -1104,7 +1142,7 @@ def main():
         page_icon="🏸",
         layout="wide"
     )
-    
+
     # Enhanced CSS
     st.markdown("""
     <style>
@@ -1128,19 +1166,18 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-    
-    # Initialize session state
+
+    # Session state init
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
         st.session_state["role"] = "guest"
-    
-    # Show login form if not authenticated as admin
+
     if not st.session_state.get("authenticated", False):
         login_form()
-    
-    # Main content
-    
-    # Enhanced Navigation
+
+   
+
+    # ======= MENU & NAVIGATION =======
     if st.session_state.get("role") == "admin":
         menu_options = {
             "🏠 Klasemen": show_klasemen,
@@ -1163,19 +1200,17 @@ def main():
             "🎖️ Peringkat": show_final_standings,
             "📺 Live Score TV": show_live_score_tv
         }
-    
+
     selected = st.sidebar.radio("Menu", list(menu_options.keys()))
-    
-    # Enhanced logout button
+
     if st.session_state.get("authenticated", False):
         if st.sidebar.button("👋 Logout", type="primary"):
             st.session_state["authenticated"] = False
             st.session_state["role"] = "guest"
             st.session_state.pop('start_time', None)
             st.rerun()
-    
-    
-    # Display selected page
+
+    # Tampilkan halaman terpilih
     menu_options[selected]()
 
 if __name__ == "__main__":
