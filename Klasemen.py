@@ -130,7 +130,7 @@ def calculate_klasemen(grup):
     for row in cursor.execute("""
         SELECT team1, team2, score1, score2 
         FROM matches 
-        WHERE grup = ? AND status = 'done'
+        WHERE grup = ? AND status = 'Selesai'
     """, (grup,)):
         t1, t2, s1, s2 = row
         if s1 is None or s2 is None:
@@ -576,7 +576,7 @@ def show_live_match():
                     score1 = ?, score2 = ?, 
                     team1_pf = ?, team1_pa = ?, 
                     team2_pf = ?, team2_pa = ?, 
-                    status = 'done', 
+                    status = 'Selesai', 
                 WHERE id = ?
             """, (score1, score2, score1, score2, score2, score1, match_id))
 
@@ -882,7 +882,7 @@ def show_live_score_tv():
                 time.sleep(1)
                 st.rerun()
 
-        elif status == "done":
+        elif status == "Selesai":
             st.info("✅ Pertandingan sudah selesai.")
 
     st.sidebar.markdown("""
