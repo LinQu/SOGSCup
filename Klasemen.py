@@ -1,74 +1,49 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import random
 from datetime import datetime
 import time
 import requests
+import psycopg2
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env
+load_dotenv()
 
 # ===========================
-# Database Setup
+# Database Helper Functions
 # ===========================
-def init_db():
-    conn = sqlite3.connect("badminton_cup.db", check_same_thread=False)
-    cursor = conn.cursor()
-
-    # Table for Teams
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        grup TEXT NOT NULL,
-        nama_tim TEXT NOT NULL UNIQUE
+def get_connection():
+    """Create and return a database connection"""
+    return psycopg2.connect(
+        user=os.getenv("user"),
+        password=os.getenv("password"),
+        host=os.getenv("host"),
+        port=os.getenv("port"),
+        dbname=os.getenv("dbname")
     )
-    """)
 
-    # Table for Matches (dengan kolom tambahan)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS matches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        grup TEXT NOT NULL,
-        team1 TEXT NOT NULL,
-        team2 TEXT NOT NULL,
-        score1 INTEGER,
-        score2 INTEGER,
-        team1_pf INTEGER,
-        team1_pa INTEGER,
-        team2_pf INTEGER,
-        team2_pa INTEGER,
-        court TEXT,
-        waktu TEXT,
-        status TEXT DEFAULT 'scheduled',
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(grup, team1, team2)
-    )
-    """)
-
-    # Alter Table - Tambahkan kolom jika belum ada
-    def add_column_if_not_exists(col_name, col_type):
-        try:
-            cursor.execute(f"ALTER TABLE matches ADD COLUMN {col_name} {col_type}")
-        except sqlite3.OperationalError as e:
-            if f"duplicate column name: {col_name}" not in str(e).lower():
-                raise e  # hanya abaikan jika kolom sudah ada
-
-    for col, tipe in [
-        ("team1_pf", "INTEGER"),
-        ("team1_pa", "INTEGER"),
-        ("team2_pf", "INTEGER"),
-        ("team2_pa", "INTEGER"),
-        ("court", "TEXT"),
-        ("waktu", "TEXT"),
-        ("status", "TEXT")
-    ]:
-        add_column_if_not_exists(col, tipe)
-
-    conn.commit()
-    return conn, cursor
-
-
-conn, cursor = init_db()
-
-
+def execute_query(query, params=None, fetch=False):
+    """Execute a SQL query and return results if fetch=True"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(query, params)
+        if fetch:
+            columns = [desc[0] for desc in cur.description]
+            data = [dict(zip(columns, row)) for row in cur.fetchall()]
+            return data
+        else:
+            conn.commit()
+            return cur.rowcount
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Database error: {str(e)}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
 
 # ===========================
 # Authentication
@@ -77,10 +52,6 @@ USERS = {
     "admin": "admin123",
     "viewer": "viewonly"
 }
-
-def delete_match(match_id):
-    cursor.execute("DELETE FROM matches WHERE id = ?", (match_id,))
-    conn.commit()
 
 def login_form():
     """Display login form in sidebar"""
@@ -112,30 +83,38 @@ def login_form():
 # Helper Functions
 # ===========================
 def get_grup_teams(grup):
-    """Get all teams in a group"""
-    return [row[0] for row in cursor.execute("SELECT nama_tim FROM teams WHERE grup=?", (grup,)).fetchall()]
+    """Get all teams in a group from database"""
+    query = "SELECT nama_tim FROM teams WHERE grup = %s"
+    result = execute_query(query, (grup,), fetch=True)
+    return [row["nama_tim"] for row in result] if result else []
 
 def get_all_grups():
-    """Get all available groups"""
-    return sorted(set([row[0] for row in cursor.execute("SELECT grup FROM teams").fetchall()]))
+    """Get all unique group names from database"""
+    query = "SELECT DISTINCT grup FROM teams WHERE grup IS NOT NULL ORDER BY grup"
+    result = execute_query(query, fetch=True)
+    return [row["grup"] for row in result] if result else []
 
 def calculate_klasemen(grup):
-    """Hitung klasemen berdasarkan pertandingan selesai"""
-
+    """Calculate group standings"""
     teams = get_grup_teams(grup)
     if not teams:
         return pd.DataFrame()
 
-    # Inisialisasi statistik
+    # Initialize stats
     stats = {team: {"Main": 0, "Menang": 0, "Kalah": 0, "PF": 0, "PA": 0} for team in teams}
 
-    # Ambil pertandingan selesai
-    for row in cursor.execute("""
+    # Get completed matches in this group
+    query = """
         SELECT team1, team2, score1, score2 
         FROM matches 
-        WHERE grup = ? AND status = 'Selesai'
-    """, (grup,)):
-        t1, t2, s1, s2 = row
+        WHERE grup = %s AND status = 'Selesai'
+    """
+    matches = execute_query(query, (grup,), fetch=True)
+    
+    for match in matches:
+        t1, t2 = match["team1"], match["team2"]
+        s1, s2 = match["score1"], match["score2"]
+
         if s1 is None or s2 is None:
             continue
 
@@ -154,7 +133,7 @@ def calculate_klasemen(grup):
             stats[t2]["Menang"] += 1
             stats[t1]["Kalah"] += 1
 
-    # Susun DataFrame klasemen
+    # Create standings DataFrame
     tabel = []
     for team, val in stats.items():
         selisih = val["PF"] - val["PA"]
@@ -168,9 +147,8 @@ def calculate_klasemen(grup):
 
     return pd.DataFrame(tabel).sort_values(by=["Poin", "Selisih"], ascending=[False, False]).reset_index(drop=True)
 
-
 def style_klasemen(df):
-    """Styling simple without background_gradient (no matplotlib needed)"""
+    """Styling for standings table"""
     if df.empty:
         return df
 
@@ -182,12 +160,12 @@ def style_klasemen(df):
             {'selector': 'td', 'props': [('border', '1px solid #dee2e6')]}
         ])
 
-
 # ===========================
 # UI Components
 # ===========================
 def show_klasemen():
-     # ======= CUACA SECTION =======
+    """Display group standings"""
+    # Weather section
     weather = get_weather()
     with st.container():
         st.markdown("### ☁️ Cuaca Saat Ini – Kosambi, Tangerang")
@@ -195,18 +173,20 @@ def show_klasemen():
         col1.metric("🌤 Kondisi", weather["condition"])
         col2.metric("🌧️ Hujan", f"{weather['rain']} mm/h")
         col3.metric("🌬️ Angin", f"{weather['wind_kmh']:.1f} km/jam")
-        
+        col4.metric("🏸 Bermain", "✅" if weather["can_play"] else "❌", 
+                   "Mungkin" if weather["can_play"] else "Hindari")
         st.markdown("---")
-    """Display group standings"""
+    
     st.subheader("📊 Klasemen Grup", divider="rainbow")
     
-    if not get_all_grups():
+    all_grups = get_all_grups()
+    if not all_grups:
         st.warning("Belum ada tim yang terdaftar")
         return
     
-    tabs = st.tabs([f"Grup {grup}" for grup in get_all_grups()])
+    tabs = st.tabs([f"Grup {grup}" for grup in all_grups])
     
-    for i, grup in enumerate(get_all_grups()):
+    for i, grup in enumerate(all_grups):
         with tabs[i]:
             df = calculate_klasemen(grup)
             
@@ -231,13 +211,14 @@ def show_input_score():
     """Score input interface"""
     st.subheader("✍️ Input Skor Pertandingan", divider="rainbow")
     
-    if not get_all_grups():
+    all_grups = get_all_grups()
+    if not all_grups:
         st.warning("Belum ada tim yang terdaftar")
         return
-    
-    selected_grup = st.selectbox("Pilih Grup", get_all_grups())
+
+    selected_grup = st.selectbox("Pilih Grup", all_grups)
     teams = get_grup_teams(selected_grup)
-    
+
     if not teams:
         st.warning(f"Belum ada tim di Grup {selected_grup}")
         return
@@ -248,11 +229,14 @@ def show_input_score():
     matchups = [(a, b) for i, a in enumerate(teams) for j, b in enumerate(teams) if i < j]
     
     for t1, t2 in matchups:
-        # Check if match already exists
-        existing = cursor.execute(
-            "SELECT score1, score2 FROM matches WHERE grup=? AND team1=? AND team2=?",
-            (selected_grup, t1, t2)
-        ).fetchone()
+        # Check if match exists
+        query = """
+            SELECT id, score1, score2 
+            FROM matches 
+            WHERE grup = %s AND team1 = %s AND team2 = %s
+        """
+        existing = execute_query(query, (selected_grup, t1, t2), fetch=True)
+        existing_match = existing[0] if existing else None
         
         with st.expander(f"{t1} vs {t2}", expanded=False):
             col1, col2 = st.columns(2)
@@ -261,7 +245,7 @@ def show_input_score():
                     f"Score {t1}",
                     min_value=0,
                     max_value=30,
-                    value=existing[0] if existing else 0,
+                    value=existing_match["score1"] if existing_match else 0,
                     key=f"score1_{selected_grup}_{t1}_{t2}"
                 )
             with col2:
@@ -269,16 +253,27 @@ def show_input_score():
                     f"Score {t2}",
                     min_value=0,
                     max_value=30,
-                    value=existing[1] if existing else 0,
+                    value=existing_match["score2"] if existing_match else 0,
                     key=f"score2_{selected_grup}_{t1}_{t2}"
                 )
-            
+
             if st.button("Simpan", key=f"save_{selected_grup}_{t1}_{t2}"):
-                cursor.execute("""
-                    INSERT OR REPLACE INTO matches (grup, team1, team2, score1, score2)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (selected_grup, t1, t2, score1, score2))
-                conn.commit()
+                if existing_match:
+                    # Update existing match
+                    query = """
+                        UPDATE matches 
+                        SET score1 = %s, score2 = %s, status = 'Selesai'
+                        WHERE id = %s
+                    """
+                    execute_query(query, (score1, score2, existing_match["id"]))
+                else:
+                    # Insert new match
+                    query = """
+                        INSERT INTO matches (grup, team1, team2, score1, score2, status)
+                        VALUES (%s, %s, %s, %s, %s, 'Selesai')
+                    """
+                    execute_query(query, (selected_grup, t1, t2, score1, score2))
+                
                 st.success("Skor berhasil disimpan!")
                 time.sleep(1)
                 st.rerun()
@@ -297,38 +292,42 @@ def show_team_management():
         submitted = st.form_submit_button("Tambah Tim")
         
         if submitted and nama_tim:
-            try:
-                cursor.execute(
-                    "INSERT INTO teams (grup, nama_tim) VALUES (?, ?)", 
-                    (grup, nama_tim)
-                )
-                conn.commit()
+            # Check if team already exists
+            query = "SELECT id FROM teams WHERE nama_tim = %s"
+            existing = execute_query(query, (nama_tim,), fetch=True)
+            
+            if existing:
+                st.error("Tim dengan nama tersebut sudah ada")
+            else:
+                query = "INSERT INTO teams (grup, nama_tim) VALUES (%s, %s)"
+                execute_query(query, (grup, nama_tim))
                 st.success("Tim berhasil ditambahkan!")
                 time.sleep(1)
                 st.rerun()
-            except sqlite3.IntegrityError:
-                st.error("Tim dengan nama tersebut sudah ada")
 
     st.markdown("### Daftar Tim")
-    df = pd.read_sql("SELECT grup, nama_tim FROM teams ORDER BY grup, nama_tim", conn)
-    
-    if df.empty:
+
+    # Get team list
+    query = "SELECT * FROM teams ORDER BY grup, nama_tim"
+    teams_data = execute_query(query, fetch=True)
+    teams = pd.DataFrame(teams_data) if teams_data else pd.DataFrame()
+
+    if teams.empty:
         st.warning("Belum ada tim yang terdaftar")
     else:
         st.dataframe(
-            df.style.set_properties(**{'text-align': 'center'}) \
-                  .set_table_styles([{
-                      'selector': 'th',
-                      'props': [('background-color', '#4a7d8c'), ('color', 'white')]
-                  }]),
+            teams.style.set_properties(**{'text-align': 'center'}) \
+                .set_table_styles([{
+                    'selector': 'th',
+                    'props': [('background-color', '#4a7d8c'), ('color', 'white')]
+                }]),
             use_container_width=True,
             hide_index=True
         )
-        
+
         if st.button("Hapus Semua Tim", type="primary"):
-            cursor.execute("DELETE FROM teams")
-            cursor.execute("DELETE FROM matches")
-            conn.commit()
+            execute_query("DELETE FROM teams")
+            execute_query("DELETE FROM matches")
             st.success("Semua tim dan pertandingan telah dihapus")
             time.sleep(1)
             st.rerun()
@@ -337,7 +336,7 @@ def show_final_bracket():
     """Final bracket interface"""
     st.subheader("🏆 Bagan Final", divider="rainbow")
     
-    # Cek apakah semua tim sudah bermain minimal 3 kali
+    # Check if all groups are ready
     all_groups_ready = True
     group_status = []
     
@@ -354,7 +353,7 @@ def show_final_bracket():
         else:
             group_status.append(f"Grup {grup}: ✅ (siap untuk final)")
     
-    # Tampilkan status grup
+    # Display group status
     st.markdown("### Status Kesiapan Grup")
     for status in group_status:
         st.write(status)
@@ -366,7 +365,7 @@ def show_final_bracket():
         - Setiap tim harus sudah bermain minimal 3 kali
         """)
         
-        # Tampilkan calon finalis jika ada
+        # Display potential finalists
         all_finalists = []
         for grup in get_all_grups():
             df = calculate_klasemen(grup)
@@ -382,10 +381,10 @@ def show_final_bracket():
                     st.info(f"Grup {grup}: {team}")
         return
     
-    # Jika semua grup siap, buat bagan final
+    # If all groups are ready, create final bracket
     st.success("Semua grup telah memenuhi syarat! Siap untuk menentukan bagan final.")
     
-    # Ambil 2 tim teratas dari setiap grup
+    # Get top 2 teams from each group
     all_finalists = []
     for grup in get_all_grups():
         df = calculate_klasemen(grup)
@@ -393,7 +392,7 @@ def show_final_bracket():
         all_finalists.append((grup, df.iloc[1]["Tim"]))  # Runner-up
     
     if "final_draw" not in st.session_state:
-        # Buat bagan final yang seimbang
+        # Create balanced final bracket
         juara_grup = {grup: team for grup, team in all_finalists if all_finalists.index((grup, team)) % 2 == 0}
         runner_up = {grup: team for grup, team in all_finalists if all_finalists.index((grup, team)) % 2 == 1}
         
@@ -405,7 +404,7 @@ def show_final_bracket():
         ]
     
     if st.button("Acak Ulang Bagan"):
-        # Acak tetapi tetap pertahankan juara grup vs runner-up
+        # Shuffle while maintaining champions vs runners-up
         groups = ["A", "B", "C", "D"]
         random.shuffle(groups)
         
@@ -420,11 +419,11 @@ def show_final_bracket():
         ]
         st.rerun()
     
-    # Tampilkan bagan final
+    # Display final bracket
     st.markdown("### Bagan 8 Besar")
     draw = st.session_state["final_draw"]
     
-    # Tampilkan dengan layout yang bagus
+    # Display with nice layout
     col1, col2 = st.columns(2)
     
     with col1:
@@ -482,259 +481,45 @@ def show_final_bracket():
     </div>
     """, unsafe_allow_html=True)
 
-# [Previous imports and database setup remain the same...]
-
-# ===========================
-# New Helper Functions
-# ===========================
 def get_all_matches():
-    """Get all matches with formatted datetime"""
-    return pd.read_sql("""
-        SELECT id, grup, team1, team2, score1, score2,
-               strftime('%d/%m/%Y %H:%M', updated_at) as waktu,
-               CASE 
-                    WHEN status IS NULL THEN 'Belum dimulai'
-                    ELSE status
-                END AS status
+    """Get all matches from database"""
+    query = """
+        SELECT id, grup, team1, team2, score1, score2, updated_at, status
         FROM matches
         ORDER BY updated_at DESC
-    """, conn)
-
-def generate_match_schedule(grup, match_dates):
-    """Generate match schedule for a group"""
-    teams = get_grup_teams(grup)
-    matchups = [(a, b) for i, a in enumerate(teams) for j, b in enumerate(teams) if i < j]
+    """
+    matches = execute_query(query, fetch=True)
     
-    for i, (t1, t2) in enumerate(matchups):
-        match_date = match_dates[i % len(match_dates)]
-        cursor.execute("""
-            INSERT OR IGNORE INTO matches (grup, team1, team2, updated_at)
-            VALUES (?, ?, ?, ?)
-        """, (grup, t1, t2, match_date))
-    conn.commit()
+    if not matches:
+        return pd.DataFrame(columns=["id", "grup", "team1", "team2", "score1", "score2", "waktu", "status"])
+    
+    df = pd.DataFrame(matches)
+    df["waktu"] = pd.to_datetime(df["updated_at"]).dt.strftime("%d/%m/%Y %H:%M")
+    df["status"] = df["status"].fillna("Belum dimulai")
+    
+    return df[["id", "grup", "team1", "team2", "score1", "score2", "waktu", "status"]]
 
-def calculate_final_standings():
-    """Calculate final tournament standings"""
-    winners = {}
-    for grup in get_all_grups():
-        df = calculate_klasemen(grup)
-        if len(df) >= 2:
-            winners[grup] = {
-                'juara': df.iloc[0]['Tim'],
-                'runner_up': df.iloc[1]['Tim']
-            }
-    return winners
-
-# ===========================
-# New UI Components
-# ===========================
 def show_live_match():
     """Live match input with timer"""
     st.subheader("🕒 Live Match Input", divider="rainbow")
-    
-    # Select ongoing match
-    live_matches = pd.read_sql("""
-        SELECT id, grup, team1, team2 
-        FROM matches 
-        ORDER BY grup
-    """, conn)
-    
-    # Buat mapping dari display label ke match_id
-    match_map = {
-        f"{x['team1']} vs {x['team2']} (Grup {x['grup']}) - {x['waktu']}": x['id']
-        for _, x in live_matches.iterrows()
-    }
 
-    # Jika belum ada yang dipilih, set default ke match pertama
-    if 'selected_match_id' not in st.session_state:
-        st.session_state.selected_match_id = live_matches.iloc[0]['id']
-
-    # Ambil label dari match_map berdasarkan match_id tersimpan
-    default_label = next((k for k, v in match_map.items() if v == st.session_state.selected_match_id), None)
-
-    selected_label = st.sidebar.selectbox(
-        "Pilih Pertandingan Aktif",
-        options=list(match_map.keys()),
-        index=list(match_map.keys()).index(default_label) if default_label in match_map else 0
-    )
-
-    # Simpan pilihan baru ke session_state
-    st.session_state.selected_match_id = match_map[selected_label]
-
-    # Gunakan match_id dari session_state
-    match_id = st.session_state.selected_match_id
-    
-    # Timer section
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Timer Pertandingan**")
-        timer_placeholder = st.empty()
-        if st.button("Mulai Timer"):
-            st.session_state['start_time'] = time.time()
-        
-        if 'start_time' in st.session_state:
-            elapsed = time.time() - st.session_state['start_time']
-            mins, secs = divmod(int(elapsed), 60)
-            timer_placeholder.markdown(f"⏱️ **{mins:02d}:{secs:02d}**")
-    
-    # Score input
-    with col2:
-        st.markdown("**Input Skor**")
-        score1 = st.number_input(f"Skor {live_matches.iloc[0]['team1']}", min_value=0, max_value=30)
-        score2 = st.number_input(f"Skor {live_matches.iloc[0]['team2']}", min_value=0, max_value=30)
-        
-        if st.button("Simpan Skor"):
-            cursor.execute("""
-                UPDATE matches SET 
-                    score1 = ?, score2 = ?, 
-                    team1_pf = ?, team1_pa = ?, 
-                    team2_pf = ?, team2_pa = ?, 
-                    status = 'Selesai', 
-                WHERE id = ?
-            """, (score1, score2, score1, score2, score2, score1, match_id))
-
-            conn.commit()
-            st.success("Skor berhasil disimpan!")
-            time.sleep(1)
-            st.rerun()
-def update_match(id, team1, team2, waktu, grup):
-    conn = sqlite3.connect("badminton_cup.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""
-        UPDATE matches 
-        SET team1 = ?, team2 = ?, updated_at = ?, grup = ?
-        WHERE id = ?
-    """, (team1, team2, waktu, grup, id))
-    conn.commit()
-    conn.close()
-
-def show_match_schedule():
-    """Match scheduling interface for individual teams"""
-    st.subheader("🗓️ Jadwal Pertandingan Antar Tim", divider="rainbow")
-
-    with st.expander("Buat Jadwal Baru", expanded=False):
-        with st.form("schedule_form"):
-            # Get all teams
-            all_teams = pd.read_sql("SELECT nama_tim FROM teams ORDER BY nama_tim", conn)
-
-            if all_teams.empty:
-                st.warning("Belum ada tim yang terdaftar")
-                st.stop()
-
-            team_list = all_teams["nama_tim"].tolist()
-
-            # Input team1 and team2 manually
-            team1 = st.selectbox("Pilih Tim 1", team_list, key="team1")
-            team2 = st.selectbox("Pilih Tim 2", team_list, key="team2")
-
-            # Optional group label
-            group_label = st.text_input("Label Grup (Opsional)", value="Non-Grup")
-
-            # Date and time selection
-            st.markdown("**Pilih Tanggal dan Waktu Pertandingan**")
-            match_date = st.date_input("Tanggal", datetime.now().date(), key="match_date")
-            match_time = st.time_input("Waktu", datetime.strptime("19:00", "%H:%M").time(), key="match_time")
-
-            if st.form_submit_button("Simpan Jadwal"):
-                match_datetime = datetime.combine(match_date, match_time).strftime('%Y-%m-%d %H:%M:%S')
-
-                cursor.execute("""
-                    INSERT OR IGNORE INTO matches (grup, team1, team2, updated_at)
-                    VALUES (?, ?, ?, ?)
-                """, (group_label, team1, team2, match_datetime))
-                conn.commit()
-                st.success(f"Jadwal pertandingan {team1} vs {team2} berhasil disimpan!")
-                time.sleep(1)
-                st.rerun()
-
-    st.markdown("### 📋 Daftar Jadwal Pertandingan")
-
-    is_admin = st.session_state.role == "admin"
-
+    # Fetch matches from database
     matches = get_all_matches()
-
-    if not matches.empty:
-        matches["No"] = range(1, len(matches)+1)
-        matches["Waktu"] = pd.to_datetime(matches["waktu"], format='%d/%m/%Y %H:%M')
-
-        
-        # Header
-        col_header = st.columns([0.5, 2.5, 2.5, 2, 1.2, 1.2, 1])
-        col_header[0].markdown("**No**")
-        col_header[1].markdown("**Tim 1**")
-        col_header[2].markdown("**Tim 2**")
-        col_header[3].markdown("**Waktu**")
-        col_header[4].markdown("**Grup**")
-        col_header[5].markdown("**Status**")
-        if is_admin:
-            col_header[6].markdown("**Aksi**")
-
-        # Baris data
-        for _, row in matches.iterrows():
-            c = st.columns([0.5, 2.5, 2.5, 2, 1.2, 1.2, 1])
-
-            c[0].markdown(f"{row['No']}")
-
-            # Editable field
-            team1 = c[1].text_input(" ", value=row['team1'], key=f"team1_{row['id']}")
-            team2 = c[2].text_input(" ", value=row['team2'], key=f"team2_{row['id']}")
-            waktu_str = c[3].text_input(" ", value=row['Waktu'].strftime('%d/%m/%Y %H:%M'), key=f"waktu_{row['id']}")
-            grup = c[4].text_input(" ", value=row['grup'], key=f"grup_{row['id']}")
-            status = c[5].selectbox(" ", ["Belum", "Selesai"], index=0 if row["status"] == "Belum" else 1, key=f"status_{row['id']}")
-
-            # Aksi admin
-            if is_admin:
-                with c[6]:
-                    col_btn1, col_btn2 = st.columns([1, 1])
-                    if col_btn1.button("💾", key=f"save_{row['id']}"):
-                        try:
-                            waktu_parsed = datetime.strptime(waktu_str, "%d/%m/%Y %H:%M")
-                            update_match(row['id'], team1, team2, waktu_parsed, grup)
-                            st.success(f"Pertandingan {team1} vs {team2} diperbarui.")
-                            time.sleep(1)
-                            st.rerun()
-                        except ValueError:
-                            st.error("Format waktu salah. Gunakan dd/mm/yyyy HH:MM.")
-                    
-                    if col_btn2.button("🗑️", key=f"del_{row['id']}"):
-                        delete_match(row['id'])
-                        st.warning(f"Pertandingan {team1} vs {team2} dihapus.")
-                        time.sleep(1)
-                        st.rerun()
-
     
-
-       
-    else:
-        st.warning("Belum ada jadwal pertandingan")
-
-def show_live_score_tv():
-    """Live Score Display for TV with auto-refresh and team selection"""
-    
-    st.sidebar.title("📅 Pilih Pertandingan")
-
-    # Ambil semua pertandingan
-    matches = pd.read_sql("""
-        SELECT id, grup, team1, team2, score1, score2, status,
-               strftime('%d/%m/%Y %H:%M', updated_at) as waktu
-        FROM matches
-        ORDER BY updated_at DESC
-    """, conn)
-
     if matches.empty:
-        st.warning("Tidak ada pertandingan yang sedang berlangsung")
+        st.warning("Belum ada data pertandingan.")
         return
 
+    # Create mapping for selectbox
     match_map = {
-        f"{x['team1']} vs {x['team2']} (Grup {x['grup']}) - {x['waktu']}": x['id']
-        for _, x in matches.iterrows()
+        f"{row['team1']} vs {row['team2']} (Grup {row['grup']}) - {row['waktu']}": row['id']
+        for _, row in matches.iterrows()
     }
 
     if 'selected_match_id' not in st.session_state:
         st.session_state.selected_match_id = matches.iloc[0]['id']
 
-    default_label = next((label for label, mid in match_map.items()
-                         if mid == st.session_state.selected_match_id), None)
+    default_label = next((k for k, v in match_map.items() if v == st.session_state.selected_match_id), None)
 
     selected_label = st.sidebar.selectbox(
         "Pilih Pertandingan Aktif",
@@ -745,11 +530,167 @@ def show_live_score_tv():
     st.session_state.selected_match_id = match_map[selected_label]
     match_id = st.session_state.selected_match_id
 
+    match_row = matches[matches["id"] == match_id].iloc[0]
+
+    # Timer
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Timer Pertandingan**")
+        timer_placeholder = st.empty()
+        if st.button("Mulai Timer"):
+            st.session_state['start_time'] = time.time()
+        if 'start_time' in st.session_state:
+            elapsed = time.time() - st.session_state['start_time']
+            mins, secs = divmod(int(elapsed), 60)
+            timer_placeholder.markdown(f"⏱️ **{mins:02d}:{secs:02d}**")
+
+    # Score input
+    with col2:
+        st.markdown("**Input Skor**")
+        score1 = st.number_input(f"Skor {match_row['team1']}", min_value=0, max_value=30)
+        score2 = st.number_input(f"Skor {match_row['team2']}", min_value=0, max_value=30)
+
+        if st.button("Simpan Skor"):
+            query = """
+                UPDATE matches 
+                SET score1 = %s, score2 = %s, status = 'Selesai'
+                WHERE id = %s
+            """
+            execute_query(query, (score1, score2, match_id))
+            st.success("Skor berhasil disimpan!")
+            time.sleep(1)
+            st.rerun()
+
+def show_match_schedule():
+    """Match scheduling interface"""
+    st.subheader("🗓️ Jadwal Pertandingan Antar Tim", divider="rainbow")
+
+    with st.expander("Buat Jadwal Baru", expanded=False):
+        with st.form("schedule_form"):
+            # Get all teams
+            query = "SELECT nama_tim FROM teams ORDER BY nama_tim"
+            teams_data = execute_query(query, fetch=True)
+            all_teams = pd.DataFrame(teams_data) if teams_data else pd.DataFrame()
+
+            if all_teams.empty:
+                st.warning("Belum ada tim yang terdaftar")
+                st.stop()
+
+            team_list = all_teams["nama_tim"].tolist()
+
+            team1 = st.selectbox("Pilih Tim 1", team_list, key="team1")
+            team2 = st.selectbox("Pilih Tim 2", team_list, key="team2")
+            group_label = st.text_input("Label Grup (Opsional)", value="Non-Grup")
+
+            st.markdown("**Pilih Tanggal dan Waktu Pertandingan**")
+            match_date = st.date_input("Tanggal", datetime.now().date(), key="match_date")
+            match_time = st.time_input("Waktu", datetime.strptime("19:00", "%H:%M").time(), key="match_time")
+
+            if st.form_submit_button("Simpan Jadwal"):
+                match_datetime = datetime.combine(match_date, match_time).isoformat()
+
+                query = """
+                    INSERT INTO matches (grup, team1, team2, updated_at)
+                    VALUES (%s, %s, %s, %s)
+                """
+                execute_query(query, (group_label, team1, team2, match_datetime))
+                st.success(f"Jadwal pertandingan {team1} vs {team2} berhasil disimpan!")
+                time.sleep(1)
+                st.rerun()
+
+    st.markdown("### 📋 Daftar Jadwal Pertandingan")
+    is_admin = st.session_state.get("role", "") == "admin"
+
+    # Get all matches
+    matches = get_all_matches()
+    
+    if not matches.empty:
+        matches["No"] = range(1, len(matches) + 1)
+        matches["Waktu"] = pd.to_datetime(matches["updated_at"])
+
+        col_header = st.columns([0.5, 2.5, 2.5, 2, 1.2, 1.2, 1])
+        col_header[0].markdown("**No**")
+        col_header[1].markdown("**Tim 1**")
+        col_header[2].markdown("**Tim 2**")
+        col_header[3].markdown("**Waktu**")
+        col_header[4].markdown("**Grup**")
+        col_header[5].markdown("**Status**")
+        if is_admin:
+            col_header[6].markdown("**Aksi**")
+
+        for _, row in matches.iterrows():
+            c = st.columns([0.5, 2.5, 2.5, 2, 1.2, 1.2, 1])
+
+            c[0].markdown(f"{row['No']}")
+            team1 = c[1].text_input(" ", value=row['team1'], key=f"team1_{row['id']}")
+            team2 = c[2].text_input(" ", value=row['team2'], key=f"team2_{row['id']}")
+            waktu_str = c[3].text_input(" ", value=row['Waktu'].strftime('%d/%m/%Y %H:%M'), key=f"waktu_{row['id']}")
+            grup = c[4].text_input(" ", value=row['grup'], key=f"grup_{row['id']}")
+            status = c[5].selectbox(" ", ["Belum", "Selesai"], index=0 if row.get("status", "Belum") == "Belum" else 1, key=f"status_{row['id']}")
+
+            if is_admin:
+                with c[6]:
+                    col_btn1, col_btn2 = st.columns([1, 1])
+                    if col_btn1.button("💾", key=f"save_{row['id']}"):
+                        try:
+                            waktu_parsed = datetime.strptime(waktu_str, "%d/%m/%Y %H:%M").isoformat()
+                            query = """
+                                UPDATE matches
+                                SET team1 = %s, team2 = %s, updated_at = %s, grup = %s, status = %s
+                                WHERE id = %s
+                            """
+                            execute_query(query, (team1, team2, waktu_parsed, grup, status, row["id"]))
+                            st.success(f"Pertandingan {team1} vs {team2} diperbarui.")
+                            time.sleep(1)
+                            st.rerun()
+                        except ValueError:
+                            st.error("Format waktu salah. Gunakan dd/mm/yyyy HH:MM.")
+
+                    if col_btn2.button("🗑️", key=f"del_{row['id']}"):
+                        query = "DELETE FROM matches WHERE id = %s"
+                        execute_query(query, (row["id"],))
+                        st.warning(f"Pertandingan {team1} vs {team2} dihapus.")
+                        time.sleep(1)
+                        st.rerun()
+    else:
+        st.warning("Belum ada jadwal pertandingan.")
+
+def show_live_score_tv():
+    st.sidebar.title("📅 Pilih Pertandingan")
+
+    # Get all matches
+    matches = get_all_matches()
+    
+    if matches.empty:
+        st.warning("Tidak ada pertandingan yang sedang berlangsung")
+        return
+
+    # Create mapping for selectbox
+    match_map = {
+        f"{row['team1']} vs {row['team2']} (Grup {row['grup']}) - {row['waktu']}": row['id']
+        for _, row in matches.iterrows()
+    }
+
+    if 'selected_match_id' not in st.session_state:
+        st.session_state.selected_match_id = matches.iloc[0]['id']
+
+    default_label = next((k for k, v in match_map.items() if v == st.session_state.selected_match_id), None)
+
+    selected_label = st.sidebar.selectbox(
+        "Pilih Pertandingan Aktif",
+        options=list(match_map.keys()),
+        index=list(match_map.keys()).index(default_label) if default_label else 0
+    )
+
+    match_id = match_map[selected_label]
+    st.session_state.selected_match_id = match_id
+
     st.title("⚡ LIVE SCORE")
     st.markdown(f"### {selected_label}")
 
     refresh_placeholder = st.empty()
 
+    # CSS styling
     st.markdown("""
     <style>
         #MainMenu, header, footer {visibility: hidden;}
@@ -794,108 +735,100 @@ def show_live_score_tv():
     </style>
     """, unsafe_allow_html=True)
 
-    current_match = pd.read_sql(f"""
-        SELECT team1, team2, score1, score2, status,
-               strftime('%d/%m/%Y %H:%M', updated_at) as waktu
-        FROM matches 
-        WHERE id = {match_id}
-    """, conn).iloc[0]
+    # Get match data
+    query = "SELECT * FROM matches WHERE id = %s"
+    match_data = execute_query(query, (match_id,), fetch=True)
+    match = match_data[0] if match_data else None
+    
+    if not match:
+        st.error("Pertandingan tidak ditemukan")
+        return
 
     with refresh_placeholder.container():
         st.markdown(f"""
         <div class="scoreboard">
             <div class="teams">
                 <div>
-                    <div class="team-name">{current_match['team1']}</div>
-                    <div class="score">{current_match['score1'] or 0}</div>
+                    <div class="team-name">{match['team1']}</div>
+                    <div class="score">{match['score1'] or 0}</div>
                 </div>
                 <div class="vs">VS</div>
                 <div>
-                    <div class="team-name">{current_match['team2']}</div>
-                    <div class="score">{current_match['score2'] or 0}</div>
+                    <div class="team-name">{match['team2']}</div>
+                    <div class="score">{match['score2'] or 0}</div>
                 </div>
             </div>
             <div class="match-info">
-                Status: <strong>{current_match['status']}</strong> 
+                Status: <strong>{match['status'] or 'Belum dimulai'}</strong> 
             </div>
         </div>
         """, unsafe_allow_html=True)
-        st.markdown(
-    """
-    <style>
-        .footer {
-            position: relative;
-            bottom: 0;
-            width: 100%;
-            margin-top: 50px;
-            text-align: center;
-            color: #888;
-            font-size: 12px;
-        }
-    </style>
 
-    <div class="footer">
-        <hr>
-        <p>PBGS Badminton Cup © 2025 • Developed by OPGS Dev</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-    )
+        st.markdown("""
+        <style>
+            .footer {
+                position: relative;
+                bottom: 0;
+                width: 100%;
+                margin-top: 50px;
+                text-align: center;
+                color: #888;
+                font-size: 12px;
+            }
+        </style>
+        <div class="footer">
+            <hr>
+            <p>PBGS Badminton Cup © 2025 • Developed by OPGS Dev</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # === ADMIN CONTROLS ===
+    # Admin controls
     if st.session_state.get("role") == "admin":
-        st.markdown("---") 
+        st.markdown("---")
         st.subheader("Admin Controls")
 
-        status = current_match["status"]
-
-        if not status  or status.lower() == "pending":
+        if match["status"] in (None, "pending", "Belum dimulai"):
             if st.button("🚀 Mulai Pertandingan"):
-                cursor.execute("UPDATE matches SET status = 'ongoing', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (match_id,))
-                conn.commit()
+                query = """
+                    UPDATE matches 
+                    SET status = 'ongoing', updated_at = NOW()
+                    WHERE id = %s
+                """
+                execute_query(query, (match_id,))
                 st.success("Pertandingan dimulai!")
                 time.sleep(1)
                 st.rerun()
 
-        elif status == "ongoing":
+        elif match["status"] == "ongoing":
             col1, col2 = st.columns(2)
             with col1:
-                new_score1 = st.number_input(
-                    f"Score {current_match['team1']}",
-                    min_value=0,
-                    max_value=30,
-                    value=int(current_match['score1']) if current_match['score1'] is not None else 0
-                )
+                new_score1 = st.number_input(f"Score {match['team1']}", min_value=0, max_value=30, value=match['score1'] or 0)
             with col2:
-                new_score2 = st.number_input(
-                    f"Score {current_match['team2']}",
-                    min_value=0,
-                    max_value=30,
-                    value=int(current_match['score2']) if current_match['score2'] is not None else 0
-                )
+                new_score2 = st.number_input(f"Score {match['team2']}", min_value=0, max_value=30, value=match['score2'] or 0)
 
             if st.button("✅ Update Score"):
-                cursor.execute("""
-                    UPDATE matches SET 
-                        score1 = ?, score2 = ?, 
-                        team1_pf = ?, team1_pa = ?, 
-                        team2_pf = ?, team2_pa = ?, 
-                        updated_at = CURRENT_TIMESTAMP 
-                    WHERE id = ?
-                """, (new_score1, new_score2, new_score1, new_score2, new_score2, new_score1, match_id))
-                conn.commit()
+                query = """
+                    UPDATE matches 
+                    SET score1 = %s, score2 = %s, updated_at = NOW()
+                    WHERE id = %s
+                """
+                execute_query(query, (new_score1, new_score2, match_id))
                 st.success("Score diperbarui!")
                 time.sleep(1)
                 st.rerun()
 
             if st.button("⛔ Selesaikan Pertandingan"):
-                cursor.execute("UPDATE matches SET status = 'Selesai', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (match_id,))
-                conn.commit()
+                query = """
+                    UPDATE matches 
+                    SET status = 'Selesai', updated_at = NOW()
+                    WHERE id = %s
+                """
+                execute_query(query, (match_id,))
                 st.success("Pertandingan diselesaikan.")
                 time.sleep(1)
                 st.rerun()
 
-        elif status == "Selesai":
+        elif match["status"] == "Selesai":
             st.info("✅ Pertandingan sudah selesai.")
 
     st.sidebar.markdown("""
@@ -907,12 +840,9 @@ def show_live_score_tv():
 
     time.sleep(1)
     st.rerun()
-    
-
-
 
 def show_match_schedule_public():
-    """Readonly schedule view for participants or guests"""
+    """Readonly schedule view"""
     st.subheader("📅 Jadwal Pertandingan", divider="rainbow")
     
     matches = get_all_matches()
@@ -958,8 +888,6 @@ def show_match_schedule_public():
         </style>
         """, unsafe_allow_html=True)
         
-        
-            
         # Add filters
         st.markdown("---")
         st.markdown("**Filter Jadwal**")
@@ -969,7 +897,7 @@ def show_match_schedule_public():
             grup_filter = st.selectbox(
                 "Filter Grup",
                 ["Semua Grup"] + sorted(matches["grup"].unique().tolist())
-            )
+        )
         
         with col2:
             status_filter = st.selectbox(
@@ -985,6 +913,7 @@ def show_match_schedule_public():
         
         # Show filtered count
         st.caption(f"Menampilkan {len(display_df)} dari {len(matches)} pertandingan")
+        
         # Display the table in a scrollable container
         with st.container():
             st.markdown(
@@ -997,8 +926,9 @@ def show_match_schedule_public():
             )
     else:
         st.info("Belum ada jadwal yang tersedia.", icon="ℹ️")
+
 def show_match_history():
-    """Match history viewer with improved layout"""
+    """Match history viewer"""
     st.subheader("📜 Riwayat Pertandingan", divider="rainbow")
 
     matches = get_all_matches()
@@ -1024,7 +954,7 @@ def show_match_history():
         st.info("Tidak ada pertandingan yang sesuai filter.")
         return
 
-    # Format tampilannya menjadi grid/list dengan highlight warna status
+    # Format display
     for _, match in matches.iterrows():
         warna = "green" if match['status'] == "Selesai" else "orange"
         with st.container():
@@ -1037,6 +967,17 @@ def show_match_history():
                 </div>
             """, unsafe_allow_html=True)
 
+def calculate_final_standings():
+    """Calculate final tournament standings"""
+    winners = {}
+    for grup in get_all_grups():
+        df = calculate_klasemen(grup)
+        if len(df) >= 2:
+            winners[grup] = {
+                'juara': df.iloc[0]["Tim"],
+                'runner_up': df.iloc[1]["Tim"]
+            }
+    return winners
 
 def show_final_standings():
     """Final tournament standings"""
@@ -1082,59 +1023,73 @@ def export_data():
             df = calculate_klasemen(grup)
             df["Grup"] = grup
             data.append(df)
-        result = pd.concat(data)
+        result = pd.concat(data) if data else pd.DataFrame()
     elif export_type == "Jadwal Pertandingan":
         result = get_all_matches()
     else:
-        result = pd.DataFrame(calculate_final_standings()).T
+        winners = calculate_final_standings()
+        result = pd.DataFrame(winners).T if winners else pd.DataFrame()
     
     # Display preview
-    st.dataframe(result, use_container_width=True)
-    
-    # Export buttons
-    col1, col2 = st.columns(2)
-    with col1:
-        st.download_button(
-            "Download CSV",
-            data=result.to_csv(index=False).encode('utf-8'),
-            file_name=f"{export_type.lower().replace(' ', '_')}.csv",
-            mime="text/csv"
-        )
-    with col2:
-        st.download_button(
-            "Download Excel",
-            data=result.to_excel(excel_writer=pd.ExcelWriter('temp.xlsx', engine='xlsxwriter')),
-            file_name=f"{export_type.lower().replace(' ', '_')}.xlsx",
-            mime="application/vnd.ms-excel"
-        )
+    if not result.empty:
+        st.dataframe(result, use_container_width=True)
+        
+        # Export buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "Download CSV",
+                data=result.to_csv(index=False).encode('utf-8'),
+                file_name=f"{export_type.lower().replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+        with col2:
+            # For Excel export, we need to use BytesIO
+            from io import BytesIO
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                result.to_excel(writer, index=False)
+            st.download_button(
+                "Download Excel",
+                data=output.getvalue(),
+                file_name=f"{export_type.lower().replace(' ', '_')}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
+    else:
+        st.warning("Tidak ada data untuk diexport")
 
 def get_weather():
-    # Konstanta API & Lokasi
-    API_KEY = "2b795fafd0c6df1d4e28586298e87e21"  # Ganti dengan API Key Anda
+    # API Constants & Location
+    API_KEY = "2b795fafd0c6df1d4e28586298e87e21"
     LAT = -6.0941415
     LON = 106.6835138
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={LAT}&lon={LON}&appid={API_KEY}&units=metric"
-    res = requests.get(url).json()
-
-    wind_speed_ms = res.get("wind", {}).get("speed", 0)
-    wind_speed_kmh = wind_speed_ms * 3.6
-    rain_1h = res.get("rain", {}).get("1h", 0.0)
-    condition = res.get("weather", [{}])[0].get("main", "-")
-
-    can_play = (rain_1h <= 0.5) and (wind_speed_kmh <= 15)
-
-    return {
-        "condition": condition,
-        "rain": rain_1h,
-        "wind_kmh": wind_speed_kmh,
-        "can_play": can_play
-    }
-
     
-         
+    try:
+        res = requests.get(url).json()
+        wind_speed_ms = res.get("wind", {}).get("speed", 0)
+        wind_speed_kmh = wind_speed_ms * 3.6
+        rain_1h = res.get("rain", {}).get("1h", 0.0)
+        condition = res.get("weather", [{}])[0].get("main", "-")
+        can_play = (rain_1h <= 0.5) and (wind_speed_kmh <= 15)
 
+        return {
+            "condition": condition,
+            "rain": rain_1h,
+            "wind_kmh": wind_speed_kmh,
+            "can_play": can_play
+        }
+    except Exception as e:
+        st.error(f"Gagal mendapatkan data cuaca: {str(e)}")
+        return {
+            "condition": "-",
+            "rain": 0,
+            "wind_kmh": 0,
+            "can_play": True
+        }
+    
 # ===========================
-# Updated Main App
+# Main App
 # ===========================
 def main():
     st.set_page_config(
@@ -1175,8 +1130,6 @@ def main():
     if not st.session_state.get("authenticated", False):
         login_form()
 
-   
-
     # ======= MENU & NAVIGATION =======
     if st.session_state.get("role") == "admin":
         menu_options = {
@@ -1213,26 +1166,28 @@ def main():
     # Tampilkan halaman terpilih
     menu_options[selected]()
 
+    # Footer
+    st.markdown(
+        """
+        <style>
+            .footer {
+                position: relative;
+                bottom: 0;
+                width: 100%;
+                margin-top: 50px;
+                text-align: center;
+                color: #888;
+                font-size: 12px;
+            }
+        </style>
+
+        <div class="footer">
+            <hr>
+            <p>PBGS Badminton Cup © 2025 • Developed by OPGS Dev</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 if __name__ == "__main__":
     main()
-    st.markdown(
-    """
-    <style>
-        .footer {
-            position: relative;
-            bottom: 0;
-            width: 100%;
-            margin-top: 50px;
-            text-align: center;
-            color: #888;
-            font-size: 12px;
-        }
-    </style>
-
-    <div class="footer">
-        <hr>
-        <p>PBGS Badminton Cup © 2025 • Developed by OPGS Dev</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-    )
