@@ -1,4 +1,6 @@
-streamlit>=1.33.0
-pandas>=2.2.2
-xlsxwriter
+streamlit
+pandas
 requests
+psycopg2-binary
+python-dotenv
+xlsxwriter
