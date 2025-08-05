@@ -606,7 +606,7 @@ def show_match_schedule():
     
     if not matches.empty:
         matches["No"] = range(1, len(matches) + 1)
-        matches["Waktu"] = pd.to_datetime(matches["updated_at"])
+        matches["Waktu"] = matches["waktu"]
 
         col_header = st.columns([0.5, 2.5, 2.5, 2, 1.2, 1.2, 1])
         col_header[0].markdown("**No**")
@@ -624,7 +624,7 @@ def show_match_schedule():
             c[0].markdown(f"{row['No']}")
             team1 = c[1].text_input(" ", value=row['team1'], key=f"team1_{row['id']}")
             team2 = c[2].text_input(" ", value=row['team2'], key=f"team2_{row['id']}")
-            waktu_str = c[3].text_input(" ", value=row['Waktu'].strftime('%d/%m/%Y %H:%M'), key=f"waktu_{row['id']}")
+            waktu_str = c[3].text_input(" ", value=row['Waktu'], key=f"waktu_{row['id']}")
             grup = c[4].text_input(" ", value=row['grup'], key=f"grup_{row['id']}")
             status = c[5].selectbox(" ", ["Belum", "Selesai"], index=0 if row.get("status", "Belum") == "Belum" else 1, key=f"status_{row['id']}")
 
@@ -814,7 +814,8 @@ def show_live_score_tv():
                 """
                 execute_query(query, (new_score1, new_score2, match_id))
                 st.success("Score diperbarui!")
-                time.sleep(1)
+            
+            if st.button("🔄 Refresh Skor"):
                 st.rerun()
 
             if st.button("⛔ Selesaikan Pertandingan"):
@@ -825,8 +826,7 @@ def show_live_score_tv():
                 """
                 execute_query(query, (match_id,))
                 st.success("Pertandingan diselesaikan.")
-                time.sleep(1)
-                st.rerun()
+                
 
         elif match["status"] == "Selesai":
             st.info("✅ Pertandingan sudah selesai.")
@@ -838,8 +838,6 @@ def show_live_score_tv():
     3. Sistem auto-refresh setiap 1 detik
     """)
 
-    time.sleep(1)
-    st.rerun()
 
 def show_match_schedule_public():
     """Readonly schedule view"""
